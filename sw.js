@@ -2,7 +2,7 @@
 // sw.js — 오프라인 캐시 (PWA, 자산관리 포트폴리오 관리 앱 전용)
 // ═══════════════════════════════════════════════════════════
 
-const CACHE = 'asset-app-v1';
+const CACHE = 'asset-app-v2';
 const CACHED_FILES = [
   './',
   './index.html',
