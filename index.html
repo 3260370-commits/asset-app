@@ -73,6 +73,9 @@
   .fld input,.fld select{width:100%;padding:8px 9px;border:1px solid var(--line);border-radius:8px;font-size:.83rem;background:#fff}
   .h-foot{display:flex;justify-content:space-between;margin-top:8px;font-size:.76rem}
   .h-foot .pl{font-weight:700}
+  .cat-heading{display:flex;justify-content:space-between;align-items:baseline;font-size:.8rem;font-weight:700;color:var(--accent-dark);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--accent-soft)}
+  .cat-heading:first-child{margin-top:0}
+  .cat-heading .cnt{font-size:.7rem;font-weight:500;color:var(--sub)}
   .add-btn{position:fixed;bottom:18px;right:18px;width:54px;height:54px;border-radius:50%;background:var(--accent);color:#fff;font-size:1.7rem;box-shadow:0 4px 12px rgba(124,58,237,.4);display:flex;align-items:center;justify-content:center;z-index:5}
   .empty{text-align:center;color:var(--sub);font-size:.82rem;padding:20px 0;line-height:1.7}
   /* 토스트 */
@@ -166,6 +169,11 @@ const LS_DIRTY = 'asset_dirty_v1';      /* 로컬에 커밋 안 된 변경이 �
 const LS_PRIN  = 'asset_principal_v1';  /* 투입원금 (증권사 기준 수익률 계산용) */
 const COLORS = ['#7c3aed','#0e7a5f','#2563eb','#d97706','#d64545','#0891b2','#65a30d','#be185d'];
 
+/* 자산 분류 4종 — 예금/적금은 이율+만기예상금액으로, 부동산/기타는 평가액+목표비중으로 관리 */
+const CATEGORIES = { deposit:'예금', installment:'적금', real_estate:'부동산', other:'기타' };
+const CATEGORY_ORDER = ['deposit','installment','real_estate','other'];
+function isSavingCat(cat){ return cat==='deposit' || cat==='installment'; }
+
 /* seedData: 배포 원칙 — 실제 보유 데이터를 코드에 절대 하드코딩하지 않는다 */
 function seedData(){ return []; }
 
@@ -197,14 +205,19 @@ function normalize(h, i){
   return {
     id: h.id || ('h' + Date.now() + '_' + (i||0) + '_' + Math.floor(Math.random()*1e4)),
     name: h.name || '이름 없음',
+    category: CATEGORY_ORDER.includes(h.category) ? h.category : 'other',
     avgPrice: Number(h.avgPrice ?? 0) || 0,            // 투입 원금
-    currentPrice: Number(h.currentPrice ?? 0) || 0,    // 현재 평가액
-    targetWeight: Number(h.targetWeight ?? 0) || 0,
+    currentPrice: Number(h.currentPrice ?? 0) || 0,    // 현재 평가액 (부동산/기타)
+    targetWeight: Number(h.targetWeight ?? 0) || 0,    // 목표비중 (부동산/기타)
+    interestRate: Number(h.interestRate ?? 0) || 0,    // 이율 % (예금/적금)
+    maturityAmount: Number(h.maturityAmount ?? 0) || 0,// 만기 예상 금액 (예금/적금)
   };
 }
 
 /* ================= 계산 ================= */
-function valueOf(h){ return h.currentPrice; }
+// 예금/적금은 만기 전까지 잔액이 원금과 같다고 보고 원금을 평가액으로 사용
+// (만기 예상 금액은 별도로 카드 하단에만 참고 표시, 총계에는 아직 반영 안 함)
+function valueOf(h){ return isSavingCat(h.category) ? h.avgPrice : h.currentPrice; }
 function costOf(h){ return h.avgPrice; }
 function fmt(n){ return Math.round(n).toLocaleString('ko-KR') + '원'; }
 function pct(n){ return (Math.round(n*10)/10).toFixed(1) + '%'; }
@@ -238,14 +251,16 @@ function renderSummary(){
     el2.className = pl2>0?'pos':pl2<0?'neg':'';
   }else{ el2.textContent = '-'; el2.className = ''; }
 }
+// 목표비중 점검은 부동산/기타 자산에만 적용됨 (예금/적금은 이율·만기예상금액으로 관리하므로 제외)
 function renderWeights(){
   const box = document.getElementById('weightRows');
   const alertBox = document.getElementById('weightAlert');
   const total = holdings.reduce((s,h)=>s+valueOf(h),0);
   const thr = getThr();
-  if(!holdings.length || total<=0){ box.innerHTML = '<div class="empty">자산을 추가하면 비중 점검이 표시됩니다</div>'; alertBox.innerHTML=''; return; }
+  const targetable = holdings.filter(h=>!isSavingCat(h.category));
+  if(!targetable.length || total<=0){ box.innerHTML = '<div class="empty">부동산/기타 자산에 목표비중을 입력하면 비중 점검이 표시됩니다</div>'; alertBox.innerHTML=''; return; }
   let html = '', alerts = [];
-  holdings.forEach(h=>{
+  targetable.forEach(h=>{
     const cur = valueOf(h)/total*100;
     const gap = cur - h.targetWeight;
     let cls='ok', mark='●';
@@ -261,12 +276,10 @@ function renderWeights(){
       alerts.push(`${h.name}: ${diffAmt>0?'약 '+fmt(diffAmt)+' 축소':'약 '+fmt(-diffAmt)+' 증액'} 필요`);
     }
   });
-  const tSum = holdings.reduce((s,h)=>s+h.targetWeight,0);
   box.innerHTML = html;
   let a = '';
-  if(Math.round(tSum*10)/10 !== 100) a += `<div class="alertbox">⚠ 목표비중 합계가 ${pct(tSum)}입니다 (100%가 되도록 조정하세요)</div>`;
-  if(alerts.length) a += `<div class="alertbox">🔔 <b>리밸런싱 검토 필요 (±${thr}%p 초과)</b><br>${alerts.map(esc).join('<br>')}</div>`;
-  else if(!a) a = `<div class="okbox">✅ 모든 자산이 목표비중 ±${thr}%p 이내입니다</div>`;
+  if(alerts.length) a = `<div class="alertbox">🔔 <b>리밸런싱 검토 필요 (±${thr}%p 초과)</b><br>${alerts.map(esc).join('<br>')}</div>`;
+  else a = `<div class="okbox">✅ 부동산/기타 자산이 모두 목표비중 ±${thr}%p 이내입니다</div>`;
   alertBox.innerHTML = a;
 }
 function renderAlloc(){
@@ -289,25 +302,53 @@ function renderHoldings(){
     list.innerHTML = '<div class="empty">보유 자산이 없습니다.<br>오른쪽 아래 + 버튼으로 추가하거나<br>GitHub에서 "가져오기"를 눌러 주세요.</div>';
     return;
   }
-  list.innerHTML = holdings.map(h=>{
-    const v = valueOf(h), c = costOf(h), pl = v-c, rate = c>0?pl/c*100:0;
-    const plCls = pl>0?'pos':pl<0?'neg':'';
-    return `<div class="holding" data-id="${h.id}">
-      <div class="h-top">
-        <input class="h-name" data-id="${h.id}" data-field="name" value="${esc(h.name)}" placeholder="자산명 (예: 저축은행 예금, 부동산 등)">
-        <button class="del" data-del="${h.id}" title="삭제">✕</button>
-      </div>
-      <div class="h-grid">
-        <div class="fld"><div class="lbl">투입 원금(원)</div><input type="number" data-id="${h.id}" data-field="avgPrice" value="${h.avgPrice}"></div>
-        <div class="fld"><div class="lbl">현재 평가액(원)</div><input type="number" data-id="${h.id}" data-field="currentPrice" value="${h.currentPrice}"></div>
-        <div class="fld"><div class="lbl">목표비중(%)</div><input type="number" data-id="${h.id}" data-field="targetWeight" value="${h.targetWeight}"></div>
-      </div>
-      <div class="h-foot">
-        <span>평가액 <b>${fmt(v)}</b></span>
-        <span class="pl ${plCls}">${pl>=0?'+':''}${fmt(pl)} (${rate>=0?'+':''}${pct(rate)})</span>
-      </div>
-    </div>`;
-  }).join('');
+  let html = '';
+  CATEGORY_ORDER.forEach(cat=>{
+    const items = holdings.filter(h=>h.category===cat);
+    if(!items.length) return;
+    const subtotal = items.reduce((s,h)=>s+valueOf(h),0);
+    html += `<div class="cat-heading"><span>${CATEGORIES[cat]}</span><span class="cnt">${items.length}개 · ${fmt(subtotal)}</span></div>`;
+    html += items.map(holdingCardHTML).join('');
+  });
+  list.innerHTML = html;
+}
+// 카드 하단: 예금/적금은 만기 시 예상 이자를, 부동산/기타는 평가손익을 보여줌
+function footHTML(h){
+  const v = valueOf(h);
+  if(isSavingCat(h.category)){
+    const gain = h.maturityAmount - h.avgPrice;
+    const rate = h.avgPrice>0 ? gain/h.avgPrice*100 : 0;
+    return `<span>현재 잔액 <b>${fmt(v)}</b></span>
+      <span class="pl ${gain>=0?'pos':'neg'}">만기 시 ${gain>=0?'+':''}${fmt(gain)} (${gain>=0?'+':''}${pct(rate)})</span>`;
+  }
+  const c = costOf(h), pl = v-c, rate = c>0?pl/c*100:0;
+  return `<span>평가액 <b>${fmt(v)}</b></span>
+    <span class="pl ${pl>0?'pos':pl<0?'neg':''}">${pl>=0?'+':''}${fmt(pl)} (${rate>=0?'+':''}${pct(rate)})</span>`;
+}
+function holdingCardHTML(h){
+  const isSaving = isSavingCat(h.category);
+  return `<div class="holding" data-id="${h.id}">
+    <div class="h-top">
+      <input class="h-name" data-id="${h.id}" data-field="name" value="${esc(h.name)}" placeholder="자산명 (예: 저축은행 예금, 부동산 등)">
+      <button class="del" data-del="${h.id}" title="삭제">✕</button>
+    </div>
+    <div class="h-grid">
+      <div class="fld"><div class="lbl">분류</div>
+        <select data-id="${h.id}" data-field="category">
+          ${CATEGORY_ORDER.map(k=>`<option value="${k}" ${h.category===k?'selected':''}>${CATEGORIES[k]}</option>`).join('')}
+        </select></div>
+      ${isSaving ? `
+      <div class="fld"><div class="lbl">원금(원)</div><input type="number" data-id="${h.id}" data-field="avgPrice" value="${h.avgPrice}"></div>
+      <div class="fld"><div class="lbl">이율(%)</div><input type="number" step="any" data-id="${h.id}" data-field="interestRate" value="${h.interestRate}"></div>
+      <div class="fld"><div class="lbl">만기 예상 금액(원)</div><input type="number" data-id="${h.id}" data-field="maturityAmount" value="${h.maturityAmount}"></div>
+      ` : `
+      <div class="fld"><div class="lbl">투입 원금(원)</div><input type="number" data-id="${h.id}" data-field="avgPrice" value="${h.avgPrice}"></div>
+      <div class="fld"><div class="lbl">현재 평가액(원)</div><input type="number" data-id="${h.id}" data-field="currentPrice" value="${h.currentPrice}"></div>
+      <div class="fld"><div class="lbl">목표비중(%)</div><input type="number" data-id="${h.id}" data-field="targetWeight" value="${h.targetWeight}"></div>
+      `}
+    </div>
+    <div class="h-foot">${footHTML(h)}</div>
+  </div>`;
 }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -316,18 +357,22 @@ document.addEventListener('input', e=>{
   const id = e.target.dataset.id, field = e.target.dataset.field;
   if(!id || !field) return;
   const h = holdings.find(x=>x.id===id); if(!h) return;
-  if(['avgPrice','currentPrice','targetWeight'].includes(field)) h[field] = Number(e.target.value)||0;
+  if(['avgPrice','currentPrice','targetWeight','interestRate','maturityAmount'].includes(field)) h[field] = Number(e.target.value)||0;
   else h[field] = e.target.value;
   saveHoldings(false);
   if(field==='name'){ renderSummary(); renderWeights(); renderAlloc(); }
   else { renderSummary(); renderWeights(); renderAlloc(); updateFoot(id); }
 });
+document.addEventListener('change', e=>{
+  if(e.target.dataset.field==='category'){
+    const h = holdings.find(x=>x.id===e.target.dataset.id); if(!h) return;
+    h.category = e.target.value; saveHoldings(true); render();
+  }
+});
 function updateFoot(id){
   const h = holdings.find(x=>x.id===id); if(!h) return;
   const el = document.querySelector(`.holding[data-id="${id}"] .h-foot`); if(!el) return;
-  const v=valueOf(h), c=costOf(h), pl=v-c, rate=c>0?pl/c*100:0;
-  el.innerHTML = `<span>평가액 <b>${fmt(v)}</b></span>
-    <span class="pl ${pl>0?'pos':pl<0?'neg':''}">${pl>=0?'+':''}${fmt(pl)} (${rate>=0?'+':''}${pct(rate)})</span>`;
+  el.innerHTML = footHTML(h);
 }
 /* 삭제: 확인창 없이 즉시 (연금저축·IRP 앱 원칙 유지) */
 document.addEventListener('click', e=>{
@@ -335,10 +380,11 @@ document.addEventListener('click', e=>{
   if(delId){ holdings = holdings.filter(h=>h.id!==delId); saveHoldings(true); render(); }
 });
 document.getElementById('btnAdd').addEventListener('click', ()=>{
-  holdings.push(normalize({ name:'', avgPrice:0, currentPrice:0, targetWeight:0 }, holdings.length));
+  const h = normalize({ name:'', category:'other', avgPrice:0, currentPrice:0, targetWeight:0, interestRate:0, maturityAmount:0 }, holdings.length);
+  holdings.push(h);
   saveHoldings(true); render();
-  const cards = document.querySelectorAll('.holding');
-  if(cards.length){ const last = cards[cards.length-1]; last.scrollIntoView({behavior:'smooth'}); const inp = last.querySelector('.h-name'); if(inp) inp.focus(); }
+  const card = document.querySelector(`.holding[data-id="${h.id}"]`);
+  if(card){ card.scrollIntoView({behavior:'smooth'}); const inp = card.querySelector('.h-name'); if(inp) inp.focus(); }
 });
 
 /* ================= 투입원금 입력 ================= */
@@ -361,7 +407,7 @@ thrInput.addEventListener('change', ()=>{
 
 /* ================= 다운로드 / 업로드(파일) ================= */
 document.getElementById('btnDownload').addEventListener('click', ()=>{
-  const out = holdings.map(h=>({ id:h.id, name:h.name, avgPrice:h.avgPrice, currentPrice:h.currentPrice, targetWeight:h.targetWeight }));
+  const out = holdings.map(h=>({ id:h.id, name:h.name, category:h.category, avgPrice:h.avgPrice, currentPrice:h.currentPrice, targetWeight:h.targetWeight, interestRate:h.interestRate, maturityAmount:h.maturityAmount }));
   const blob = new Blob([JSON.stringify({ principal: principal, holdings: out },null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -506,7 +552,7 @@ function applyRemote(data){
 
 /* 현재 holdings를 GitHub에 커밋 */
 async function putContents(c, sha){
-  const out = holdings.map(h=>({ id:h.id, name:h.name, avgPrice:h.avgPrice, currentPrice:h.currentPrice, targetWeight:h.targetWeight }));
+  const out = holdings.map(h=>({ id:h.id, name:h.name, category:h.category, avgPrice:h.avgPrice, currentPrice:h.currentPrice, targetWeight:h.targetWeight, interestRate:h.interestRate, maturityAmount:h.maturityAmount }));
   const body = {
     message: '자산관리 앱에서 업데이트 (' + new Date().toLocaleString('ko-KR') + ')',
     content: utf8ToBase64(JSON.stringify({ principal: principal, holdings: out },null,2)),
