@@ -231,7 +231,7 @@ function normalize(h, i){
     avgPrice: Number(h.avgPrice ?? 0) || 0,            // 투입 원금
     currentPrice: Number(h.currentPrice ?? 0) || 0,    // 현재 평가액 (부동산/기타)
     interestRate: Number(h.interestRate ?? 0) || 0,    // 이율 % (예금/적금)
-    year: Number(h.year) || 0,                         // 가입 연도 (예금/적금)
+    startDate: /^\d{4}-\d{2}-\d{2}$/.test(h.startDate) ? h.startDate : '', // 가입일 (예금/적금)
     months: Number(h.months) || 0,                     // 가입 개월수 (예금/적금)
     maturityAmount: Number(h.maturityAmount ?? 0) || 0,// 만기 예상 금액 — 예금/적금은 아래서 자동 재계산됨
     taxType: TAX_TYPES.hasOwnProperty(h.taxType) ? h.taxType : 'taxable', // 과세구분 (예금 전용)
@@ -262,6 +262,20 @@ function computeInterest(h){
 function recalcMaturity(h){
   const { net } = computeInterest(h);
   h.maturityAmount = (h.avgPrice||0) + net;
+}
+
+// 가입일부터 개월수만큼, 각 연도에 몇 개월씩 걸쳐 있는지 계산
+// (예: 2026-11-01 가입, 6개월 → {2026:2, 2027:4})
+function splitMonthsByYear(startDate, months){
+  const result = {};
+  if(!startDate || !months) return result;
+  const start = new Date(startDate + 'T00:00:00');
+  for(let i=0;i<months;i++){
+    const d = new Date(start.getFullYear(), start.getMonth()+i, 1);
+    const y = d.getFullYear();
+    result[y] = (result[y]||0) + 1;
+  }
+  return result;
 }
 
 /* ================= 렌더링 ================= */
@@ -314,25 +328,33 @@ function renderAlloc(){
   bar.innerHTML=b; leg.innerHTML=l;
 }
 // 연도별로 예금/적금 이자를 묶어서 보여줌(예금은 세후, 적금은 세전 — computeInterest 참고)
+// 가입 기간이 여러 해에 걸치는 상품은 이자를 걸친 개월수 비율만큼 각 연도에 나눠 표시함
+// (원금은 실제로 돈이 들어간 가입 연도에만 표시)
 function renderYearlyInterest(){
   const box = document.getElementById('yearlyInterest');
-  const savings = holdings.filter(h=>isSavingCat(h.category) && h.year);
-  if(!savings.length){ box.innerHTML = '<div class="empty">연도를 입력한 예금/적금이 없습니다</div>'; return; }
+  const savings = holdings.filter(h=>isSavingCat(h.category) && h.startDate && h.months);
+  if(!savings.length){ box.innerHTML = '<div class="empty">가입일·가입개월수를 입력한 예금/적금이 없습니다</div>'; return; }
   const byYear = {};
+  const ensure = y => byYear[y] = byYear[y] || { principal:0, deposit:0, installment:0 };
   savings.forEach(h=>{
-    const y = h.year;
-    byYear[y] = byYear[y] || { principal:0, deposit:0, installment:0 };
     const { net, gross } = computeInterest(h);
-    byYear[y].principal += h.avgPrice||0;
-    byYear[y][h.category] += h.category==='deposit' ? net : gross;
+    const interestTotal = h.category==='deposit' ? net : gross;
+    const split = splitMonthsByYear(h.startDate, h.months);
+    const totalM = Object.values(split).reduce((a,b)=>a+b,0) || h.months;
+    Object.entries(split).forEach(([y, m])=>{
+      ensure(y)[h.category] += interestTotal * (m/totalM);
+    });
+    const startYear = h.startDate.slice(0,4);
+    ensure(startYear).principal += h.avgPrice||0;
   });
   const years = Object.keys(byYear).sort((a,b)=>b-a);
-  box.innerHTML = years.map(y=>{
+  box.innerHTML = `<div style="font-size:.7rem;color:var(--sub);margin-bottom:8px">※ 여러 해에 걸친 가입 상품은 이자가 걸친 개월수만큼 각 연도에 나뉘어 표시됩니다</div>` +
+    years.map(y=>{
     const d = byYear[y];
     const total = d.deposit + d.installment;
     return `<div class="year-row">
       <span class="yr">${y}년</span>
-      <span class="detail">원금 ${fmt(d.principal)}<br>예금이자(세후) ${fmt(d.deposit)} · 적금이자(세전) ${fmt(d.installment)}<br><b>합계 ${fmt(total)}</b></span>
+      <span class="detail">원금(가입) ${fmt(d.principal)}<br>예금이자(세후) ${fmt(d.deposit)} · 적금이자(세전) ${fmt(d.installment)}<br><b>합계 ${fmt(total)}</b></span>
     </div>`;
   }).join('');
 }
@@ -359,8 +381,8 @@ function footHTML(h){
     const gain = h.maturityAmount - h.avgPrice;
     const rate = h.avgPrice>0 ? gain/h.avgPrice*100 : 0;
     const taxLbl = h.category==='deposit' ? `<span style="color:var(--sub)">${TAX_TYPES[h.taxType]} · </span>` : '';
-    const yrLbl = h.year ? `<span style="color:var(--sub)">${h.year}년 · </span>` : '';
-    return `<span>${yrLbl}${taxLbl}현재 잔액 <b>${fmt(v)}</b></span>
+    const dateLbl = h.startDate ? `<span style="color:var(--sub)">${h.startDate.replace(/-/g,'.')} 가입 · </span>` : '';
+    return `<span>${dateLbl}${taxLbl}현재 잔액 <b>${fmt(v)}</b></span>
       <span class="pl ${gain>=0?'pos':'neg'}">만기 시 ${gain>=0?'+':''}${fmt(gain)} (${gain>=0?'+':''}${pct(rate)})</span>`;
   }
   const c = costOf(h), pl = v-c, rate = c>0?pl/c*100:0;
@@ -381,7 +403,7 @@ function holdingCardHTML(h){
           ${CATEGORY_ORDER.map(k=>`<option value="${k}" ${h.category===k?'selected':''}>${CATEGORIES[k]}</option>`).join('')}
         </select></div>
       ${isSaving ? `
-      <div class="fld"><div class="lbl">연도</div><input type="number" data-id="${h.id}" data-field="year" value="${h.year||''}" placeholder="예: 2026"></div>
+      <div class="fld"><div class="lbl">가입일</div><input type="date" data-id="${h.id}" data-field="startDate" value="${h.startDate||''}"></div>
       <div class="fld"><div class="lbl">원금(원)</div><input type="number" data-id="${h.id}" data-field="avgPrice" value="${h.avgPrice}"></div>
       <div class="fld"><div class="lbl">가입 개월수</div><input type="number" data-id="${h.id}" data-field="months" value="${h.months||''}" placeholder="예: 12"></div>
       <div class="fld"><div class="lbl">이율(%)</div><input type="number" step="any" data-id="${h.id}" data-field="interestRate" value="${h.interestRate}"></div>
@@ -406,7 +428,7 @@ document.addEventListener('input', e=>{
   const id = e.target.dataset.id, field = e.target.dataset.field;
   if(!id || !field) return;
   const h = holdings.find(x=>x.id===id); if(!h) return;
-  if(['avgPrice','currentPrice','interestRate','year','months'].includes(field)) h[field] = Number(e.target.value)||0;
+  if(['avgPrice','currentPrice','interestRate','months'].includes(field)) h[field] = Number(e.target.value)||0;
   else h[field] = e.target.value;
   if(isSavingCat(h.category)) recalcMaturity(h);
   saveHoldings(false);
@@ -438,7 +460,7 @@ document.addEventListener('click', e=>{
   if(delId){ holdings = holdings.filter(h=>h.id!==delId); saveHoldings(true); render(); }
 });
 document.getElementById('btnAdd').addEventListener('click', ()=>{
-  const h = normalize({ name:'', category:'other', avgPrice:0, currentPrice:0, interestRate:0, year:new Date().getFullYear(), months:0, taxType:'taxable' }, holdings.length);
+  const h = normalize({ name:'', category:'other', avgPrice:0, currentPrice:0, interestRate:0, startDate:new Date().toISOString().slice(0,10), months:0, taxType:'taxable' }, holdings.length);
   holdings.push(h);
   saveHoldings(true); render();
   const card = document.querySelector(`.holding[data-id="${h.id}"]`);
@@ -457,7 +479,7 @@ prinInput.addEventListener('input', ()=>{
 
 /* ================= 다운로드 / 업로드(파일) ================= */
 document.getElementById('btnDownload').addEventListener('click', ()=>{
-  const out = holdings.map(h=>({ id:h.id, name:h.name, category:h.category, avgPrice:h.avgPrice, currentPrice:h.currentPrice, interestRate:h.interestRate, year:h.year, months:h.months, maturityAmount:h.maturityAmount, taxType:h.taxType }));
+  const out = holdings.map(h=>({ id:h.id, name:h.name, category:h.category, avgPrice:h.avgPrice, currentPrice:h.currentPrice, interestRate:h.interestRate, startDate:h.startDate, months:h.months, maturityAmount:h.maturityAmount, taxType:h.taxType }));
   const blob = new Blob([JSON.stringify({ principal: principal, holdings: out },null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -602,7 +624,7 @@ function applyRemote(data){
 
 /* 현재 holdings를 GitHub에 커밋 */
 async function putContents(c, sha){
-  const out = holdings.map(h=>({ id:h.id, name:h.name, category:h.category, avgPrice:h.avgPrice, currentPrice:h.currentPrice, interestRate:h.interestRate, year:h.year, months:h.months, maturityAmount:h.maturityAmount, taxType:h.taxType }));
+  const out = holdings.map(h=>({ id:h.id, name:h.name, category:h.category, avgPrice:h.avgPrice, currentPrice:h.currentPrice, interestRate:h.interestRate, startDate:h.startDate, months:h.months, maturityAmount:h.maturityAmount, taxType:h.taxType }));
   const body = {
     message: '자산관리 앱에서 업데이트 (' + new Date().toLocaleString('ko-KR') + ')',
     content: utf8ToBase64(JSON.stringify({ principal: principal, holdings: out },null,2)),
