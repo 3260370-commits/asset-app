@@ -69,14 +69,38 @@
   /* 토스트 */
   #toast{position:fixed;bottom:84px;left:50%;transform:translateX(-50%);background:rgba(28,36,34,.88);color:#fff;padding:8px 16px;border-radius:999px;font-size:.75rem;opacity:0;transition:opacity .25s;pointer-events:none;z-index:9;white-space:nowrap}
   #toast.show{opacity:1}
+  /* PIN 잠금 */
+  .pin-overlay{position:fixed;inset:0;background:var(--bg);z-index:50;display:flex;align-items:center;justify-content:center;padding:20px}
+  .pin-box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px 24px;max-width:320px;width:100%;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.08)}
+  .pin-title{font-size:1.05rem;font-weight:700;color:var(--accent-dark)}
+  .pin-sub{font-size:.8rem;color:var(--sub);margin-top:6px}
+  .pin-input{width:100%;text-align:center;font-size:1.8rem;letter-spacing:14px;padding:12px 10px 12px 22px;border:1px solid var(--line);border-radius:10px;margin:16px 0 6px}
+  .pin-error{color:var(--red);font-size:.78rem;min-height:16px;margin-bottom:8px}
+  .pin-submit{width:100%}
+  .pin-hint{font-size:.68rem;color:var(--sub);line-height:1.5;margin-top:16px}
   @media(min-width:560px){.summary{grid-template-columns:repeat(3,1fr)}.h-grid{grid-template-columns:repeat(4,1fr)}}
 </style>
 </head>
 <body>
 
+<!-- PIN 잠금 오버레이 (기본 표시, JS가 통과 여부 판단 후 숨김) -->
+<div class="pin-overlay" id="pinOverlay">
+  <div class="pin-box">
+    <div class="pin-title" id="pinTitle">🔒 PIN 잠금</div>
+    <div class="pin-sub" id="pinSub">4자리 숫자를 입력하세요</div>
+    <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="pinInput" class="pin-input" autocomplete="off">
+    <div class="pin-error" id="pinError"></div>
+    <button class="btn-accent pin-submit" id="pinSubmit">확인</button>
+    <div class="pin-hint">⚠ PIN은 이 기기 브라우저에만 저장됩니다. 잊어버리면 브라우저에서 이 사이트 데이터를 삭제해 초기화해야 하며, 그러면 저장된 자산 데이터도 함께 사라집니다(GitHub에 올려둔 백업은 안전하니 "가져오기"로 복구하세요).</div>
+  </div>
+</div>
+
 <h1>자산관리 포트폴리오 관리 <span class="badge">자산관리</span></h1>
 <div class="updated" id="updatedAt">-</div>
-<button id="btnInstall" class="btn-accent" style="display:none;margin-bottom:12px">📱 앱으로 설치하기</button>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+  <button id="btnInstall" class="btn-accent" style="display:none">📱 앱으로 설치하기</button>
+  <button id="btnPinChange" class="btn-ghost">🔒 PIN 변경</button>
+</div>
 
 <!-- 1. 요약 -->
 <div class="card">
@@ -147,6 +171,8 @@ const LS_GH    = 'asset_gh_cfg_v1';
 const LS_SHA   = 'asset_last_sha_v1';   /* 마지막으로 동기화한 GitHub 파일 sha */
 const LS_DIRTY = 'asset_dirty_v1';      /* 로컬에 커밋 안 된 변경이 있는지 */
 const LS_PRIN  = 'asset_principal_v1';  /* 투입원금 (증권사 기준 수익률 계산용) */
+const LS_PIN   = 'asset_pin_hash_v1';   /* PIN 4자리의 SHA-256 해시 */
+const SS_UNLOCK = 'asset_pin_unlocked_v1'; /* 이 탭 세션에서 PIN 통과했는지 (sessionStorage) */
 const COLORS = ['#7c3aed','#0e7a5f','#2563eb','#d97706','#d64545','#0891b2','#65a30d','#be185d'];
 
 /* 자산 분류 4종 — 예금/적금은 이율+만기예상금액으로, 부동산/기타는 평가액으로 관리 */
@@ -595,8 +621,90 @@ function showToast(msg){
   toastTimer = setTimeout(()=>t.classList.remove('show'), 1600);
 }
 
-render();
-syncOnOpen(true);
+/* ================= PIN 잠금 ================= */
+async function sha256Hex(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('asset-app-pin:' + str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+let pinStage = 'idle'; // setup1 | setup2 | verify | change-current | change-new1 | change-new2
+let pinTemp = '';
+const pinOverlay = document.getElementById('pinOverlay');
+const pinTitle = document.getElementById('pinTitle');
+const pinSub = document.getElementById('pinSub');
+const pinInput = document.getElementById('pinInput');
+const pinError = document.getElementById('pinError');
+const pinSubmit = document.getElementById('pinSubmit');
+
+function showPinOverlay(stage){
+  pinStage = stage;
+  pinInput.value = ''; pinError.textContent = '';
+  pinOverlay.style.display = 'flex';
+  setTimeout(()=>pinInput.focus(), 50);
+  const map = {
+    setup1: ['🔒 PIN 설정', '처음 사용하시네요. 4자리 숫자로 PIN을 설정하세요'],
+    setup2: ['🔒 PIN 확인', '입력하신 PIN을 한 번 더 입력하세요'],
+    verify: ['🔒 PIN 잠금', '4자리 PIN을 입력하세요'],
+    'change-current': ['🔒 PIN 변경', '현재 PIN을 입력하세요'],
+    'change-new1': ['🔒 새 PIN 설정', '새로 사용할 4자리 PIN을 입력하세요'],
+    'change-new2': ['🔒 새 PIN 확인', '새 PIN을 한 번 더 입력하세요'],
+  };
+  pinTitle.textContent = map[stage][0]; pinSub.textContent = map[stage][1];
+}
+function hidePinOverlay(){ pinOverlay.style.display = 'none'; }
+
+async function handlePinSubmit(){
+  const val = pinInput.value.trim();
+  if(!/^\d{4}$/.test(val)){ pinError.textContent = '4자리 숫자를 입력하세요'; return; }
+  if(pinStage==='setup1'){ pinTemp = val; showPinOverlay('setup2'); return; }
+  if(pinStage==='setup2'){
+    if(val !== pinTemp){ pinError.textContent = '입력하신 PIN과 다릅니다. 처음부터 다시 설정하세요'; showPinOverlay('setup1'); return; }
+    localStorage.setItem(LS_PIN, await sha256Hex(val));
+    sessionStorage.setItem(SS_UNLOCK, '1');
+    hidePinOverlay(); unlockApp();
+    return;
+  }
+  if(pinStage==='verify'){
+    const hash = await sha256Hex(val);
+    if(hash !== localStorage.getItem(LS_PIN)){ pinError.textContent = 'PIN이 올바르지 않습니다'; pinInput.value=''; pinInput.focus(); return; }
+    sessionStorage.setItem(SS_UNLOCK, '1');
+    hidePinOverlay(); unlockApp();
+    return;
+  }
+  if(pinStage==='change-current'){
+    const hash = await sha256Hex(val);
+    if(hash !== localStorage.getItem(LS_PIN)){ pinError.textContent = '현재 PIN이 올바르지 않습니다'; pinInput.value=''; pinInput.focus(); return; }
+    showPinOverlay('change-new1');
+    return;
+  }
+  if(pinStage==='change-new1'){ pinTemp = val; showPinOverlay('change-new2'); return; }
+  if(pinStage==='change-new2'){
+    if(val !== pinTemp){ pinError.textContent = '입력하신 PIN과 다릅니다. 처음부터 다시 입력하세요'; showPinOverlay('change-new1'); return; }
+    localStorage.setItem(LS_PIN, await sha256Hex(val));
+    hidePinOverlay();
+    showToast('PIN이 변경되었습니다');
+    return;
+  }
+}
+pinSubmit.addEventListener('click', handlePinSubmit);
+pinInput.addEventListener('keydown', e=>{ if(e.key==='Enter') handlePinSubmit(); });
+pinInput.addEventListener('input', ()=>{ pinInput.value = pinInput.value.replace(/\D/g,'').slice(0,4); });
+document.getElementById('btnPinChange').addEventListener('click', ()=>{
+  if(!localStorage.getItem(LS_PIN)){ showPinOverlay('setup1'); return; }
+  showPinOverlay('change-current');
+});
+
+function unlockApp(){
+  render();
+  syncOnOpen(true);
+}
+/* 앱 시작: 이 세션에서 이미 통과했으면 바로 진입, 아니면 PIN 설정/입력 화면 표시 */
+if(localStorage.getItem(LS_PIN)){
+  if(sessionStorage.getItem(SS_UNLOCK)==='1'){ hidePinOverlay(); unlockApp(); }
+  else{ showPinOverlay('verify'); }
+}else{
+  showPinOverlay('setup1');
+}
+
 /* PWA: 설치 버튼 (Chrome이 설치 가능 판정 시 표시) */
 let deferredPrompt = null;
 window.addEventListener('beforeinstallprompt', e => {
