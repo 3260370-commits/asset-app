@@ -342,7 +342,7 @@ function renderAlloc(){
   });
   bar.innerHTML=b; leg.innerHTML=l;
 }
-// 연도별로 예금/적금 이자를 묶어서 보여줌(예금·적금 모두 과세구분 적용한 세후이자 — computeInterest 참고)
+// 연도별로 예금/적금 이자를 묶어서 보여줌(세전·세후 둘 다 표시, 세후는 과세구분 적용 — computeInterest 참고)
 // 가입 기간이 여러 해에 걸치는 상품은 이자를 걸친 개월수 비율만큼 각 연도에 나눠 표시함
 // (원금은 실제로 돈이 들어간 가입 연도에만 표시)
 function renderYearlyInterest(){
@@ -350,14 +350,16 @@ function renderYearlyInterest(){
   const savings = holdings.filter(h=>isSavingCat(h.category) && h.startDate && h.months);
   if(!savings.length){ box.innerHTML = '<div class="empty">가입일·가입개월수를 입력한 예금/적금이 없습니다</div>'; return; }
   const byYear = {};
-  const ensure = y => byYear[y] = byYear[y] || { principal:0, deposit:0, installment:0 };
+  const ensure = y => byYear[y] = byYear[y] || { principal:0, deposit:{net:0,gross:0}, installment:{net:0,gross:0} };
   savings.forEach(h=>{
-    const { net } = computeInterest(h);
-    const interestTotal = net;
+    const { net, gross } = computeInterest(h);
     const split = splitMonthsByYear(h.startDate, h.months);
     const totalM = Object.values(split).reduce((a,b)=>a+b,0) || h.months;
     Object.entries(split).forEach(([y, m])=>{
-      ensure(y)[h.category] += interestTotal * (m/totalM);
+      const frac = m/totalM;
+      const bucket = ensure(y)[h.category];
+      bucket.net += net * frac;
+      bucket.gross += gross * frac;
     });
     const startYear = h.startDate.slice(0,4);
     ensure(startYear).principal += principalOf(h);
@@ -366,10 +368,14 @@ function renderYearlyInterest(){
   box.innerHTML = `<div style="font-size:.7rem;color:var(--sub);margin-bottom:8px">※ 여러 해에 걸친 가입 상품은 이자가 걸친 개월수만큼 각 연도에 나뉘어 표시됩니다</div>` +
     years.map(y=>{
     const d = byYear[y];
-    const total = d.deposit + d.installment;
+    const totalNet = d.deposit.net + d.installment.net;
+    const totalGross = d.deposit.gross + d.installment.gross;
     return `<div class="year-row">
       <span class="yr">${y}년</span>
-      <span class="detail">원금(가입) ${fmt(d.principal)}<br>예금이자(세후) ${fmt(d.deposit)} · 적금이자(세후) ${fmt(d.installment)}<br><b>합계 ${fmt(total)}</b></span>
+      <span class="detail">원금(가입) ${fmt(d.principal)}<br>
+        예금이자 세전 ${fmt(d.deposit.gross)} · 세후 ${fmt(d.deposit.net)}<br>
+        적금이자 세전 ${fmt(d.installment.gross)} · 세후 ${fmt(d.installment.net)}<br>
+        <b>합계(세후) ${fmt(totalNet)}</b> <span style="color:var(--sub)">(세전 ${fmt(totalGross)})</span></span>
     </div>`;
   }).join('');
 }
@@ -394,13 +400,14 @@ function footHTML(h){
   const v = valueOf(h);
   if(isSavingCat(h.category)){
     const principal = principalOf(h);
-    const gain = h.maturityAmount - principal;
+    const { gross } = computeInterest(h);
+    const gain = h.maturityAmount - principal; // 세후 이자와 동일
     const rate = principal>0 ? gain/principal*100 : 0;
     const taxLbl = `<span style="color:var(--sub)">${TAX_TYPES[h.taxType]} · </span>`;
     const dateLbl = h.startDate ? `<span style="color:var(--sub)">${h.startDate.replace(/-/g,'.')} 가입 · </span>` : '';
     const balLbl = h.category==='installment' ? '총 납입액' : '현재 잔액';
     return `<span>${dateLbl}${taxLbl}${balLbl} <b>${fmt(v)}</b></span>
-      <span class="pl ${gain>=0?'pos':'neg'}">만기 시 ${gain>=0?'+':''}${fmt(gain)} (${gain>=0?'+':''}${pct(rate)})</span>`;
+      <span class="pl ${gain>=0?'pos':'neg'}">만기 시 세후 ${gain>=0?'+':''}${fmt(gain)} (${gain>=0?'+':''}${pct(rate)}) <span style="color:var(--sub);font-weight:400">· 세전 ${fmt(gross)}</span></span>`;
   }
   const c = costOf(h), pl = v-c, rate = c>0?pl/c*100:0;
   return `<span>평가액 <b>${fmt(v)}</b></span>
